@@ -38,6 +38,7 @@ dependencies:
   http:
   flutter_spinkit: ^5.2.0
   flutter_markdown: ^0.6.21
+  uuid: ^4.3.3
 
 
 dev_dependencies:
