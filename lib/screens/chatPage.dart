@@ -1,6 +1,11 @@
+import 'dart:convert';
+
 import 'package:chat_innova/constant/colors.dart';
 import 'package:chat_innova/screens/threadPage.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:permission_handler/permission_handler.dart';
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key});
@@ -14,6 +19,7 @@ class _ChatPageState extends State<ChatPage> {
   String selectedOption = 'General chat';
   final TextEditingController _textEditingController = TextEditingController();
   bool isTyping = false;
+  PlatformFile? _selectedFile;
 
   @override
   void initState() {
@@ -37,10 +43,78 @@ class _ChatPageState extends State<ChatPage> {
     });
   }
 
+  void _pickFile() async {
+    // Request storage permission
+    var status = await Permission.manageExternalStorage.request();
+
+    if (status.isGranted) {
+      // Permission granted, proceed with file picking
+      FilePickerResult? result =
+          await FilePicker.platform.pickFiles(withData: true);
+      if (result != null) {
+        setState(() {
+          _selectedFile = result.files.first;
+        });
+        print(_selectedFile?.name);
+        // Handle the picked file here
+
+        _sendFileAndMessage();
+      }
+    } else {
+      // Permission denied, show a message to the user
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Permission Required'),
+          content: Text('Please grant storage permission to pick files.'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
+  }
+
   void updateSelectedOption(String option) {
     setState(() {
       selectedOption = option;
     });
+  }
+
+  void _sendFileAndMessage() async {
+    String apiUrl = 'http://localhost:8000/chat_api/';
+
+    try {
+      // Create a multipart request
+      var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
+
+      // Add user query as a field
+      request.fields['user_query'] = _textEditingController.text;
+
+      // Add file as a part of the request
+      var bytes = _selectedFile!.bytes?.toList();
+      request.files.add(
+        http.MultipartFile.fromBytes('file', bytes!,
+            filename: _selectedFile?.name),
+      );
+
+      // Send the request
+      var streamedResponse = await request.send();
+
+      // Decode the response
+      var response = await streamedResponse.stream.bytesToString();
+      var responseData = json.decode(response);
+
+      // Return the response data
+      print(responseData);
+      return responseData;
+    } catch (e) {
+      // Handle error
+      print('Error: $e');
+    }
   }
 
   void _sendMessage() {
@@ -56,6 +130,7 @@ class _ChatPageState extends State<ChatPage> {
           messageText: messageText,
           focusText: focusText,
           isWebSearch: isWebSearch,
+          file: _selectedFile,
         ),
       ),
     );
@@ -151,14 +226,18 @@ class _ChatPageState extends State<ChatPage> {
                       children: [
                         Row(
                           children: [
-                            Container(
-                              decoration: const BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: iconBg,
+                            GestureDetector(
+                              onTap: _pickFile,
+                              // Call _pickFile when the plus icon is tapped
+                              child: Container(
+                                decoration: const BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: iconBg,
+                                ),
+                                padding: const EdgeInsets.all(5.0),
+                                child:
+                                    const Icon(Icons.add, color: Colors.white),
                               ),
-                              padding: const EdgeInsets.all(5.0),
-                              // Adjust padding as needed
-                              child: const Icon(Icons.add, color: Colors.white),
                             ),
                             const SizedBox(
                               width: 10,

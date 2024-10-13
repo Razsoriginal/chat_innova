@@ -1,7 +1,7 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:chat_innova/constant/colors.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
@@ -12,37 +12,39 @@ class ThreadPage extends StatefulWidget {
   final String messageText;
   final String focusText;
   final bool isWebSearch;
+  final PlatformFile? file;
 
   const ThreadPage({
-    super.key,
+    Key? key,
     required this.messageText,
     required this.focusText,
     required this.isWebSearch,
-  });
+    this.file,
+  }) : super(key: key);
 
   @override
   State<ThreadPage> createState() => _ThreadPageState();
 }
 
 class _ThreadPageState extends State<ThreadPage> {
-  late StreamController<String> _responseStreamController;
-  late Stream<String> _responseStream;
-  bool data = false;
-  bool isLoading = true;
-
   bool isWeb = false;
-  String selectedOption = 'General chat';
   final TextEditingController _textEditingController = TextEditingController();
-  bool isTyping = false;
   List<Map<String, String>> chatHistory = [];
+  late bool isWaitingForResponse;
+  late ScrollController _scrollController;
+  bool isTyping = false;
 
   @override
   void initState() {
     super.initState();
-    _responseStreamController = StreamController<String>();
-    _responseStream = _responseStreamController.stream;
     _textEditingController.addListener(_onTextChanged);
-    _sendFirstRequest();
+    _addUserQueryToChatHistory(widget.messageText);
+    _sendRequest(widget.messageText);
+    _scrollController = ScrollController();
+    isWaitingForResponse = true;
+    setState(() {
+      isWeb = widget.isWebSearch;
+    });
   }
 
   void _onTextChanged() {
@@ -51,107 +53,76 @@ class _ThreadPageState extends State<ThreadPage> {
     });
   }
 
-  Future<void> _sendFirstRequest() async {
+  void _addUserQueryToChatHistory(String query) {
+    chatHistory.add({'role': 'user', 'content': query});
+  }
+
+  Future<void> _sendRequest(String message) async {
     try {
-      final String isWeb = widget.isWebSearch.toString();
       final url = Uri.parse('http://localhost:8000/innova_ai/');
+      final Map<String, dynamic> requestBody = {
+        'msg': message,
+        'focus': widget.focusText,
+        'isWeb': isWeb.toString(),
+        'chatHistory': chatHistory,
+      };
+
+      // Add file to request body if available
+      if (widget.file != null) {
+        requestBody['file'] = widget.file!.bytes;
+      }
+
       final response = await http.post(
         url,
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(
-          {
-            'msg': widget.messageText,
-            'focus': widget.focusText,
-            'isWeb': isWeb,
-            'chatHistory': chatHistory
-          },
-        ),
+        body: jsonEncode(requestBody),
       );
 
       if (response.statusCode == 200) {
-        setState(() {
-          chatHistory.add({
-            'role': 'user',
-            'content': widget.messageText,
-          });
-        });
         final responseBody = response.body;
         if (kDebugMode) {
           print('Response Body: $responseBody');
         }
-        final responseStream = Stream.periodic(
-          const Duration(milliseconds: 100),
-          (_) => responseBody.substring(0, responseBody.length),
-        );
-        _responseStreamController.addStream(responseStream);
-        setState(() {
-          data = true;
-          isLoading = false;
-          chatHistory.add({'role': 'assistant', 'content': responseBody});
-        });
+        _addAssistantResponseToChatHistory(responseBody);
       } else {
         throw Exception('Failed to fetch response: ${response.reasonPhrase}');
       }
     } catch (e) {
-      _responseStreamController.addError(e);
-    }
-  }
-
-  Future<void> _sendRequest() async {
-    FocusScope.of(context).unfocus();
-    String messageText = _textEditingController.text;
-    String focusText = selectedOption;
-    String isWebSearch = isWeb.toString();
-    try {
-      final url = Uri.parse('http://localhost:8000/innova_ai/');
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(
-          {
-            'msg': messageText,
-            'focus': focusText,
-            'isWeb': isWebSearch,
-            'chatHistory': chatHistory
-          },
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Error'),
+          content: Text(e.toString()),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: Text('OK'),
+            ),
+          ],
         ),
       );
-
-      if (response.statusCode == 200) {
-        setState(() {
-          chatHistory.add({
-            'role': 'user',
-            'content': widget.messageText,
-          });
-        });
-        final responseBody = response.body;
-        if (kDebugMode) {
-          print('Response Body: $responseBody');
-        }
-        final responseStream = Stream.periodic(
-          const Duration(milliseconds: 100),
-          (_) => responseBody.substring(0, responseBody.length),
-        );
-        _responseStreamController.addStream(responseStream);
-        setState(() {
-          data = true;
-          isLoading = false;
-          chatHistory.add({'role': 'assistant', 'content': responseBody});
-        });
-      } else {
-        throw Exception('Failed to fetch response: ${response.reasonPhrase}');
-      }
-    } catch (e) {
-      _responseStreamController.addError(e);
     }
   }
 
-  void _sendMessage() {
-    FocusScope.of(context).unfocus();
+  void _addAssistantResponseToChatHistory(String response) {
     setState(() {
-      isLoading = true;
+      chatHistory.add({'role': 'assistant', 'content': response});
+      isWaitingForResponse = false;
     });
-    _sendRequest();
+
+    // Scroll to the end of the chat history
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent,
+      duration: Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
+  void _sendMessage(String message) {
+    _addUserQueryToChatHistory(message);
+    _sendRequest(message);
+    _textEditingController.clear();
+    FocusScope.of(context).unfocus(); // Hide the keyboard
   }
 
   @override
@@ -173,192 +144,194 @@ class _ThreadPageState extends State<ThreadPage> {
         ],
       ),
       body: SingleChildScrollView(
+        controller: _scrollController,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              AiChat(widget: widget, responseStream: _responseStream),
-              Padding(
-                padding: EdgeInsets.only(
-                    top: MediaQuery.of(context).size.height / 2.7),
-                child: queryInput(),
-              )
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (var chat in chatHistory)
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (chat['role'] == 'user')
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const SizedBox(
+                                height: 15,
+                              ),
+                              Text(
+                                chat['content']!,
+                                style: const TextStyle(fontSize: 33),
+                              ), // user query
+                              const SizedBox(height: 13),
+                              const Row(
+                                children: [
+                                  Icon(Icons.air),
+                                  SizedBox(
+                                    width: 10,
+                                  ),
+                                  Text(
+                                    "Answer",
+                                    style: TextStyle(fontSize: 23),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(
+                                height: 5,
+                              ),
+                            ],
+                          ),
+                        if (chat['role'] == 'assistant')
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (isWaitingForResponse)
+                                const SpinKitThreeInOut(
+                                  color: Colors.blue,
+                                  size: 30.0,
+                                )
+                              else
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    MarkdownBody(
+                                      data: chat['content']!,
+                                      selectable: true,
+                                      styleSheet: MarkdownStyleSheet(
+                                        p: const TextStyle(fontSize: 18),
+                                      ),
+                                    ),
+                                    const SizedBox(
+                                      height: 12,
+                                    ),
+                                    const Row(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceBetween,
+                                      children: [
+                                        Row(
+                                          children: [
+                                            Icon(Icons.share),
+                                            SizedBox(width: 15),
+                                            Icon(Icons.refresh),
+                                            SizedBox(width: 15),
+                                            Icon(Icons.copy_rounded),
+                                          ],
+                                        ),
+                                        Icon(Icons.more_vert),
+                                      ],
+                                    ),
+                                  ],
+                                ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: MediaQuery.of(context).size.height / 20,
+                    ),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        color: inputBg,
+                      ),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10.0, vertical: 5.0),
+                      child: Padding(
+                        padding:
+                            const EdgeInsets.only(bottom: 5, right: 5, left: 5),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            TextField(
+                              onTap: () {},
+                              controller: _textEditingController,
+                              decoration: const InputDecoration(
+                                hintText: "Ask anything...",
+                                hintStyle:
+                                    TextStyle(color: textBg, fontSize: 20),
+                                border: InputBorder.none,
+                              ),
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Row(
+                                  children: [
+                                    Container(
+                                      decoration: const BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: iconBg,
+                                      ),
+                                      padding: const EdgeInsets.all(5.0),
+                                      child: const Icon(Icons.add,
+                                          color: Colors.white),
+                                    ),
+                                    const SizedBox(
+                                      width: 10,
+                                    ),
+                                    Switch(
+                                      inactiveTrackColor: iconBg,
+                                      inactiveThumbColor: primaryColor,
+                                      value: isWeb,
+                                      onChanged: (value) {
+                                        setState(() {
+                                          isWeb = value;
+                                        });
+                                      },
+                                      activeColor: primaryColor,
+                                    ),
+                                    InkWell(
+                                      onTap: () {
+                                        setState(() {
+                                          isWeb = !isWeb;
+                                        });
+                                      },
+                                      child: Text(
+                                        'Search Web',
+                                        style: TextStyle(
+                                            fontSize: 20,
+                                            color:
+                                                isWeb ? Colors.blue : textBg),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                isTyping
+                                    ? GestureDetector(
+                                        onTap: () => _sendMessage(
+                                            _textEditingController.text),
+                                        child: const Icon(Icons.send,
+                                            color: primaryColor),
+                                      )
+                                    : Container(
+                                        decoration: const BoxDecoration(
+                                          shape: BoxShape.circle,
+                                          color: iconBg,
+                                        ),
+                                        padding: const EdgeInsets.all(5.0),
+                                        child: const Icon(Icons.mic,
+                                            color: Colors.white),
+                                      ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
       ),
-    );
-  }
-
-  Container queryInput() {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10),
-        color: inputBg,
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 10.0, vertical: 5.0),
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 5, right: 5, left: 5),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            TextField(
-              onTap: () {},
-              controller: _textEditingController,
-              decoration: const InputDecoration(
-                hintText: "Ask anything...",
-                hintStyle: TextStyle(color: textBg, fontSize: 20),
-                border: InputBorder.none,
-              ),
-              style: const TextStyle(color: Colors.white),
-            ),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    Container(
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: iconBg,
-                      ),
-                      padding: const EdgeInsets.all(5.0),
-                      // Adjust padding as needed
-                      child: const Icon(Icons.add, color: Colors.white),
-                    ),
-                    const SizedBox(
-                      width: 10,
-                    ),
-                    Switch(
-                      inactiveTrackColor: iconBg,
-                      inactiveThumbColor: primaryColor,
-                      value: isWeb,
-                      onChanged: (value) {
-                        setState(() {
-                          isWeb = value;
-                        });
-                      },
-                      activeColor: primaryColor,
-                    ),
-                    InkWell(
-                      onTap: () {
-                        setState(() {
-                          isWeb = !isWeb;
-                        });
-                      },
-                      child: Text(
-                        'Search Web',
-                        style: TextStyle(
-                            fontSize: 20, color: isWeb ? Colors.blue : textBg),
-                      ),
-                    ),
-                  ],
-                ),
-                isTyping
-                    ? GestureDetector(
-                        onTap: _sendMessage,
-                        child: const Icon(Icons.send, color: primaryColor),
-                      )
-                    : Container(
-                        decoration: const BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: iconBg,
-                        ),
-                        padding: const EdgeInsets.all(5.0),
-                        child: const Icon(Icons.mic, color: Colors.white),
-                      ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class AiChat extends StatelessWidget {
-  const AiChat({
-    super.key,
-    required this.widget,
-    required Stream<String> responseStream,
-  }) : _responseStream = responseStream;
-
-  final ThreadPage widget;
-  final Stream<String> _responseStream;
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const SizedBox(
-          height: 15,
-        ),
-        Text(
-          widget.messageText,
-          style: const TextStyle(fontSize: 33),
-        ), // user query
-        const SizedBox(height: 13),
-        const Row(
-          children: [
-            Icon(Icons.air),
-            SizedBox(
-              width: 10,
-            ),
-            Text(
-              "Answer",
-              style: TextStyle(fontSize: 23),
-            ),
-          ],
-        ),
-        const SizedBox(
-          height: 5,
-        ),
-        StreamBuilder<String>(
-          stream: _responseStream,
-          builder: (context, snapshot) {
-            if (snapshot.hasData) {
-              return MarkdownBody(
-                data: snapshot.data!,
-                selectable: true,
-                styleSheet:
-                    MarkdownStyleSheet(p: const TextStyle(fontSize: 18)),
-              ); // AI Answer
-            } else if (snapshot.hasError) {
-              return Text(
-                'Error: ${snapshot.error}',
-                style: const TextStyle(fontSize: 18),
-              );
-            } else {
-              return const SpinKitThreeInOut(
-                color: primaryColor,
-                size: 30.0,
-              );
-            }
-          },
-        ),
-        const SizedBox(
-          height: 12,
-        ),
-        const Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Row(
-              children: [
-                Icon(Icons.share),
-                SizedBox(width: 15),
-                Icon(Icons.refresh),
-                SizedBox(
-                  width: 15,
-                ),
-                Icon(Icons.copy_rounded)
-              ],
-            ),
-            Icon(Icons.more_vert)
-          ],
-        ),
-      ],
     );
   }
 }
